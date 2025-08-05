@@ -2,6 +2,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tracing::info;
 use futures::sink::{Sink, SinkExt};
 use futures::stream::StreamExt;
 
@@ -161,13 +162,26 @@ pub trait ExtendedQueryHandler: Send + Sync {
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
+        info!("📨 EXTENDED QUERY PROTOCOL - Parse Message:");
+        info!("   Statement name: {:?}", message.name);
+        info!("   Query: {}", message.query);
+        info!("   Type OIDs: {:?}", message.type_oids);
+        
         let parser = self.query_parser();
-        let stmt = StoredStatement::parse(client, &message, parser).await?;
+        let stmt = match StoredStatement::parse(client, &message, parser).await {
+            Ok(stmt) => stmt,
+            Err(e) => {
+                info!("❌ FAILED: Parse phase with error: {:?}", e);
+                return Err(e);
+            }
+        };
+        
         client.portal_store().put_statement(Arc::new(stmt));
         client
             .send(PgWireBackendMessage::ParseComplete(ParseComplete::new()))
             .await?;
-
+        
+        info!("✅ COMPLETED: Parse phase successfully - ParseComplete sent");
         Ok(())
     }
 
@@ -182,17 +196,35 @@ pub trait ExtendedQueryHandler: Send + Sync {
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
+        info!("📨 EXTENDED QUERY PROTOCOL - Bind Message:");
+        info!("   Portal name: {:?}", message.portal_name);
+        info!("   Statement name: {:?}", message.statement_name);
+        info!("   Parameter formats: {:?}", message.parameter_format_codes);
+        info!("   Parameters count: {}", message.parameters.len());
+        info!("   Result formats: {:?}", message.result_column_format_codes);
+        
         let statement_name = message.statement_name.as_deref().unwrap_or(DEFAULT_NAME);
 
         if let Some(statement) = client.portal_store().get_statement(statement_name) {
-            let portal = Portal::try_new(&message, statement)?;
+            let portal = match Portal::try_new(&message, statement) {
+                Ok(portal) => portal,
+                Err(e) => {
+                    info!("❌ FAILED: Bind phase - portal creation error: {:?}", e);
+                    return Err(e);
+                }
+            };
+            
             client.portal_store().put_portal(Arc::new(portal));
             client
                 .send(PgWireBackendMessage::BindComplete(BindComplete::new()))
                 .await?;
+            
+            info!("✅ COMPLETED: Bind phase successfully - BindComplete sent");
             Ok(())
         } else {
-            Err(PgWireError::StatementNotFound(statement_name.to_owned()))
+            let error = PgWireError::StatementNotFound(statement_name.to_owned());
+            info!("❌ FAILED: Bind phase - statement not found: {}", statement_name);
+            Err(error)
         }
     }
 
@@ -361,12 +393,16 @@ pub trait ExtendedQueryHandler: Send + Sync {
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
+        info!("📨 EXTENDED QUERY PROTOCOL - Sync Message");
+        
         client
             .send(PgWireBackendMessage::ReadyForQuery(ReadyForQuery::new(
                 client.transaction_status(),
             )))
             .await?;
         client.flush().await?;
+        
+        info!("✅ COMPLETED: Sync phase successfully - ReadyForQuery sent");
         Ok(())
     }
 
