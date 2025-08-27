@@ -93,6 +93,8 @@ pub struct FieldInfo {
     column_id: Option<i16>,
     datatype: Type,
     format: FieldFormat,
+    #[new(default)]
+    type_modifier: Option<i32>,
 }
 
 impl FieldInfo {
@@ -115,6 +117,15 @@ impl FieldInfo {
     pub fn format(&self) -> FieldFormat {
         self.format
     }
+
+    pub fn type_modifier(&self) -> Option<i32> {
+        self.type_modifier
+    }
+
+    pub fn with_type_modifier(mut self, type_modifier: i32) -> Self {
+        self.type_modifier = Some(type_modifier);
+        self
+    }
 }
 
 impl From<&FieldInfo> for FieldDescription {
@@ -124,9 +135,17 @@ impl From<&FieldInfo> for FieldDescription {
             fi.table_id.unwrap_or(0),  // table_id
             fi.column_id.unwrap_or(0), // column_id
             fi.datatype.oid(),         // type_id
-            // TODO: type size and modifier
-            0,
-            0,
+            // type_size: PostgreSQL uses -1 for variable-length types
+            // For fixed-size types like INT4, it would be 4, etc.
+            match fi.datatype.oid() {
+                20 => 8,   // INT8
+                21 => 2,   // INT2
+                23 => 4,   // INT4
+                700 => 4,  // FLOAT4
+                701 => 8,  // FLOAT8
+                _ => -1,   // Variable-length types (TEXT, VARCHAR, etc.)
+            },
+            fi.type_modifier.unwrap_or(-1), // -1 means no modifier
             fi.format.value(),
         )
     }
@@ -134,13 +153,17 @@ impl From<&FieldInfo> for FieldDescription {
 
 impl From<FieldDescription> for FieldInfo {
     fn from(value: FieldDescription) -> Self {
-        FieldInfo::new(
+        let mut field_info = FieldInfo::new(
             value.name,
             Some(value.table_id),
             Some(value.column_id),
             Type::from_oid(value.type_id).unwrap_or(Type::UNKNOWN),
             FieldFormat::from(value.format_code),
-        )
+        );
+        if value.type_modifier != -1 {
+            field_info.type_modifier = Some(value.type_modifier);
+        }
+        field_info
     }
 }
 
