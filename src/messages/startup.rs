@@ -8,6 +8,12 @@ use super::Message;
 use super::ProtocolVersion;
 use crate::error::{PgWireError, PgWireResult};
 
+pub(crate) const MINIMUM_STARTUP_MESSAGE_LEN: usize = 8;
+// as defined in pqcomm.h.
+// this const is shared between all unauthencated messages including Startup,
+// SslRequest, GssRequest and CancelRequest
+pub(crate) const MAXIMUM_STARTUP_MESSAGE_LEN: usize = super::SMALL_PACKET_SIZE_LIMIT;
+
 /// Postgresql wire protocol startup message.
 #[non_exhaustive]
 #[derive(PartialEq, Eq, Debug, new)]
@@ -27,10 +33,11 @@ impl Default for Startup {
 }
 
 impl Startup {
-    const MINIMUM_STARTUP_MESSAGE_LEN: usize = 8;
-
     pub const PROTOCOL_VERSION_3_0: i32 = 196608;
     pub const PROTOCOL_VERSION_3_2: i32 = 196610;
+
+    pub const PG_PROTOCOL_EARLIEST: u16 = 3;
+    pub const PG_PROTOCOL_LATEST: u16 = 3;
 }
 
 impl Message for Startup {
@@ -42,6 +49,11 @@ impl Message for Startup {
             .sum::<usize>();
         // length:4 + protocol_number:4 + param.len + nullbyte:1
         9 + param_length
+    }
+
+    #[inline]
+    fn max_message_length() -> usize {
+        MAXIMUM_STARTUP_MESSAGE_LEN
     }
 
     fn encode_body(&self, buf: &mut BytesMut) -> PgWireResult<()> {
@@ -61,7 +73,7 @@ impl Message for Startup {
     }
 
     fn decode(buf: &mut BytesMut, ctx: &DecodeContext) -> PgWireResult<Option<Self>> {
-        codec::decode_packet(buf, 0, |buf, full_len| {
+        codec::decode_packet(buf, 0, Self::max_message_length(), |buf, full_len| {
             Self::decode_body(buf, full_len, ctx)
         })
     }
@@ -71,12 +83,19 @@ impl Message for Startup {
         // `codec::decode_packet` has its validation to ensure buf remaining is
         // larger than `msg_len`. So with both checks, we should not have issue
         // with reading protocol numbers.
-        if msg_len <= Self::MINIMUM_STARTUP_MESSAGE_LEN {
+        if msg_len <= MINIMUM_STARTUP_MESSAGE_LEN {
             return Err(PgWireError::InvalidStartupMessage);
         }
 
         // parse
         let protocol_number_major = buf.get_u16();
+
+        // ensure the protocol version is correct and supported
+        if !(Self::PG_PROTOCOL_EARLIEST..=Self::PG_PROTOCOL_LATEST).contains(&protocol_number_major)
+        {
+            return Err(PgWireError::InvalidStartupMessage);
+        }
+
         let protocol_number_minor = buf.get_u16();
 
         // end by reading the last \0
@@ -121,6 +140,11 @@ impl Message for Authentication {
     #[inline]
     fn message_type() -> Option<u8> {
         Some(MESSAGE_TYPE_BYTE_AUTHENTICATION)
+    }
+
+    #[inline]
+    fn max_message_length() -> usize {
+        super::SMALL_BACKEND_PACKET_SIZE_LIMIT
     }
 
     #[inline]
@@ -170,6 +194,7 @@ impl Message for Authentication {
         let code = buf.get_i32();
         let msg = match code {
             0 => Authentication::Ok,
+
             2 => Authentication::KerberosV5,
             3 => Authentication::CleartextPassword,
             5 => {
@@ -195,7 +220,7 @@ impl Message for Authentication {
     }
 }
 
-pub const MESSAGE_TYPE_BYTE_PASWORD_MESSAGE_FAMILY: u8 = b'p';
+pub const MESSAGE_TYPE_BYTE_PASSWORD_MESSAGE_FAMILY: u8 = b'p';
 
 /// In postgres wire protocol, there are several message types share the same
 /// message type 'p':
@@ -226,7 +251,7 @@ pub enum PasswordMessageFamily {
 
 impl Message for PasswordMessageFamily {
     fn message_type() -> Option<u8> {
-        Some(MESSAGE_TYPE_BYTE_PASWORD_MESSAGE_FAMILY)
+        Some(MESSAGE_TYPE_BYTE_PASSWORD_MESSAGE_FAMILY)
     }
 
     fn message_length(&self) -> usize {
@@ -262,53 +287,38 @@ impl Message for PasswordMessageFamily {
 
 impl PasswordMessageFamily {
     /// Coerce the raw message into `Password`
-    ///
-    /// # Panics
-    ///
-    /// Panic when the message is already coerced into concrete type.
     pub fn into_password(self) -> PgWireResult<Password> {
-        if let PasswordMessageFamily::Raw(mut body) = self {
-            let len = body.len() + 4;
-            Password::decode_body(&mut body, len, &DecodeContext::default())
-        } else {
-            unreachable!(
-                "Do not coerce password message when it has a concrete type {:?}",
-                self
-            )
+        match self {
+            PasswordMessageFamily::Raw(mut body) => {
+                let len = body.len() + 4;
+                Password::decode_body(&mut body, len, &DecodeContext::default())
+            }
+            PasswordMessageFamily::Password(pass) => Ok(pass),
+            _ => Err(PgWireError::FailedToCoercePasswordMessage),
         }
     }
 
     /// Coerce the raw message into `SASLInitialResponse`
-    ///
-    /// # Panics
-    ///
-    /// Panic when the message is already coerced into concrete type.
     pub fn into_sasl_initial_response(self) -> PgWireResult<SASLInitialResponse> {
-        if let PasswordMessageFamily::Raw(mut body) = self {
-            let len = body.len() + 4;
-            SASLInitialResponse::decode_body(&mut body, len, &DecodeContext::default())
-        } else {
-            unreachable!(
-                "Do not coerce password message when it has a concrete type {:?}",
-                self
-            )
+        match self {
+            PasswordMessageFamily::Raw(mut body) => {
+                let len = body.len() + 4;
+                SASLInitialResponse::decode_body(&mut body, len, &DecodeContext::default())
+            }
+            PasswordMessageFamily::SASLInitialResponse(msg) => Ok(msg),
+            _ => Err(PgWireError::FailedToCoercePasswordMessage),
         }
     }
 
     /// Coerce the raw message into `SASLResponse`
-    ///
-    /// # Panics
-    ///
-    /// Panic when the message is already coerced into concrete type.
     pub fn into_sasl_response(self) -> PgWireResult<SASLResponse> {
-        if let PasswordMessageFamily::Raw(mut body) = self {
-            let len = body.len() + 4;
-            SASLResponse::decode_body(&mut body, len, &DecodeContext::default())
-        } else {
-            unreachable!(
-                "Do not coerce password message when it has a concrete type {:?}",
-                self
-            )
+        match self {
+            PasswordMessageFamily::Raw(mut body) => {
+                let len = body.len() + 4;
+                SASLResponse::decode_body(&mut body, len, &DecodeContext::default())
+            }
+            PasswordMessageFamily::SASLResponse(msg) => Ok(msg),
+            _ => Err(PgWireError::FailedToCoercePasswordMessage),
         }
     }
 }
@@ -323,7 +333,7 @@ pub struct Password {
 impl Message for Password {
     #[inline]
     fn message_type() -> Option<u8> {
-        Some(MESSAGE_TYPE_BYTE_PASWORD_MESSAGE_FAMILY)
+        Some(MESSAGE_TYPE_BYTE_PASSWORD_MESSAGE_FAMILY)
     }
 
     fn message_length(&self) -> usize {
@@ -357,6 +367,11 @@ impl Message for ParameterStatus {
     #[inline]
     fn message_type() -> Option<u8> {
         Some(MESSAGE_TYPE_BYTE_PARAMETER_STATUS)
+    }
+
+    #[inline]
+    fn max_message_length() -> usize {
+        super::SMALL_BACKEND_PACKET_SIZE_LIMIT
     }
 
     fn message_length(&self) -> usize {
@@ -475,6 +490,11 @@ impl Message for BackendKeyData {
     }
 
     #[inline]
+    fn max_message_length() -> usize {
+        super::SMALL_BACKEND_PACKET_SIZE_LIMIT
+    }
+
+    #[inline]
     fn message_length(&self) -> usize {
         8 + self.secret_key.len()
     }
@@ -500,15 +520,14 @@ impl Message for BackendKeyData {
 /// contains only a length(4) and an i32 value.
 ///
 /// The backend sends a single byte 'S' or 'N' to indicate its support. Upon 'S'
-/// the frontend should close the connection and reinitialize a new TLS
-/// connection.
+/// the frontend start initialize a TLS handshake on current connection.
 #[non_exhaustive]
 #[derive(PartialEq, Eq, Debug, new)]
 pub struct SslRequest;
 
 impl SslRequest {
     pub const BODY_MAGIC_NUMBER: i32 = 80877103;
-    pub const BODY_SIZE: usize = 8;
+    pub const BODY_SIZE: usize = MINIMUM_STARTUP_MESSAGE_LEN;
 
     pub fn is_ssl_request_packet(buf: &[u8]) -> bool {
         if buf.remaining() >= Self::BODY_SIZE {
@@ -562,6 +581,71 @@ impl Message for SslRequest {
     }
 }
 
+/// `GssEncRequest` sent from frontend to negotiate with backend to check if the
+/// backend supports GSSAPI secure connection. The packet has no message type and
+/// contains only a length(4) and an i32 value.
+///
+/// The backend sends a single byte 'G' or 'N' to indicate its support.
+#[non_exhaustive]
+#[derive(PartialEq, Eq, Debug, new)]
+pub struct GssEncRequest;
+
+impl GssEncRequest {
+    pub const BODY_MAGIC_NUMBER: i32 = 80877104;
+    pub const BODY_SIZE: usize = 8;
+
+    pub fn is_gss_enc_request_packet(buf: &[u8]) -> bool {
+        if buf.remaining() >= Self::BODY_SIZE {
+            let magic_code = (&buf[4..8]).get_i32();
+            magic_code == Self::BODY_MAGIC_NUMBER
+        } else {
+            false
+        }
+    }
+}
+
+impl Message for GssEncRequest {
+    #[inline]
+    fn message_type() -> Option<u8> {
+        None
+    }
+
+    #[inline]
+    fn message_length(&self) -> usize {
+        Self::BODY_SIZE
+    }
+
+    fn encode_body(&self, buf: &mut BytesMut) -> PgWireResult<()> {
+        buf.put_i32(Self::BODY_MAGIC_NUMBER);
+        Ok(())
+    }
+
+    fn decode_body(
+        _buf: &mut BytesMut,
+        _full_len: usize,
+        _ctx: &DecodeContext,
+    ) -> PgWireResult<Self> {
+        unreachable!();
+    }
+
+    /// Try to decode and check if the packet is a `SslRequest`.
+    ///
+    /// Please call `is_ssl_request_packet` before calling this if you don't
+    /// want to get an error for non-SslRequest packet.
+    fn decode(buf: &mut BytesMut, _ctx: &DecodeContext) -> PgWireResult<Option<Self>> {
+        if buf.remaining() >= Self::BODY_SIZE {
+            if Self::is_gss_enc_request_packet(buf) {
+                buf.advance(8);
+                Ok(Some(GssEncRequest))
+            } else {
+                Err(PgWireError::InvalidGssEncRequestMessage)
+            }
+        } else {
+            Ok(None)
+        }
+    }
+}
+
 #[non_exhaustive]
 #[derive(PartialEq, Eq, Debug, new)]
 pub struct SASLInitialResponse {
@@ -572,7 +656,7 @@ pub struct SASLInitialResponse {
 impl Message for SASLInitialResponse {
     #[inline]
     fn message_type() -> Option<u8> {
-        Some(MESSAGE_TYPE_BYTE_PASWORD_MESSAGE_FAMILY)
+        Some(MESSAGE_TYPE_BYTE_PASSWORD_MESSAGE_FAMILY)
     }
 
     #[inline]
@@ -617,7 +701,7 @@ pub struct SASLResponse {
 impl Message for SASLResponse {
     #[inline]
     fn message_type() -> Option<u8> {
-        Some(MESSAGE_TYPE_BYTE_PASWORD_MESSAGE_FAMILY)
+        Some(MESSAGE_TYPE_BYTE_PASSWORD_MESSAGE_FAMILY)
     }
 
     #[inline]
@@ -653,6 +737,11 @@ impl Message for NegotiateProtocolVersion {
     #[inline]
     fn message_type() -> Option<u8> {
         Some(MESSAGE_TYPE_BYTE_NEGOTIATE_PROTOCOL_VERSION)
+    }
+
+    #[inline]
+    fn max_message_length() -> usize {
+        super::SMALL_BACKEND_PACKET_SIZE_LIMIT
     }
 
     #[inline]

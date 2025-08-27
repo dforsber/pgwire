@@ -36,14 +36,32 @@ impl ProtocolVersion {
     }
 }
 
+// 1 gigabyte - 1
+pub(crate) const LARGE_PACKET_SIZE_LIMIT: usize = 0x3fffffff - 1;
+pub(crate) const SMALL_PACKET_SIZE_LIMIT: usize = 10000;
+// libpq has a limit on backend message length, except those
+// VALID_LONG_MESSAGE_TYPE
+pub(crate) const SMALL_BACKEND_PACKET_SIZE_LIMIT: usize = 30000;
+pub(crate) const LONG_BACKEND_PACKET_SIZE_LIMIT: usize = i32::MAX as usize;
+
 #[non_exhaustive]
-#[derive(Default, Debug, PartialEq, Eq, new)]
+#[derive(Debug, PartialEq, Eq, new)]
 pub struct DecodeContext {
     pub protocol_version: ProtocolVersion,
     #[new(value = "true")]
     pub awaiting_ssl: bool,
     #[new(value = "true")]
     pub awaiting_startup: bool,
+}
+
+impl Default for DecodeContext {
+    fn default() -> Self {
+        DecodeContext {
+            protocol_version: ProtocolVersion::default(),
+            awaiting_ssl: true,
+            awaiting_startup: true,
+        }
+    }
 }
 
 /// Define how message encode and decoded.
@@ -57,6 +75,14 @@ pub trait Message: Sized {
 
     /// Return the length of the message, including the length integer itself.
     fn message_length(&self) -> usize;
+
+    /// Return the max length of message in this type.
+    ///
+    /// This is to validate the length field in decode
+    #[inline]
+    fn max_message_length() -> usize {
+        SMALL_PACKET_SIZE_LIMIT
+    }
 
     /// Encode body part of the message.
     fn encode_body(&self, buf: &mut BytesMut) -> PgWireResult<()>;
@@ -74,7 +100,15 @@ pub trait Message: Sized {
             buf.put_u8(mt);
         }
 
-        buf.put_i32(self.message_length() as i32);
+        let len = self.message_length();
+        if len > Self::max_message_length() {
+            return Err(PgWireError::MessageTooLarge(
+                len,
+                Self::max_message_length(),
+            ));
+        }
+
+        buf.put_i32(len as i32);
         self.encode_body(buf)
     }
 
@@ -86,7 +120,7 @@ pub trait Message: Sized {
     fn decode(buf: &mut BytesMut, ctx: &DecodeContext) -> PgWireResult<Option<Self>> {
         let offset = Self::message_type().is_some().into();
 
-        codec::decode_packet(buf, offset, |buf, full_len| {
+        codec::decode_packet(buf, offset, Self::max_message_length(), |buf, full_len| {
             Self::decode_body(buf, full_len, ctx)
         })
     }
@@ -116,6 +150,7 @@ pub enum PgWireFrontendMessage {
     Startup(startup::Startup),
     CancelRequest(cancel::CancelRequest),
     SslRequest(startup::SslRequest),
+    GssEncRequest(startup::GssEncRequest),
     PasswordMessageFamily(startup::PasswordMessageFamily),
 
     Query(simplequery::Query),
@@ -154,6 +189,7 @@ impl PgWireFrontendMessage {
             Self::Startup(msg) => msg.encode(buf),
             Self::CancelRequest(msg) => msg.encode(buf),
             Self::SslRequest(msg) => msg.encode(buf),
+            Self::GssEncRequest(msg) => msg.encode(buf),
 
             Self::PasswordMessageFamily(msg) => msg.encode(buf),
 
@@ -190,6 +226,9 @@ impl PgWireFrontendMessage {
                 } else if startup::SslRequest::is_ssl_request_packet(buf) {
                     startup::SslRequest::decode(buf, ctx)
                         .map(|opt| opt.map(PgWireFrontendMessage::SslRequest))
+                } else if startup::GssEncRequest::is_gss_enc_request_packet(buf) {
+                    startup::GssEncRequest::decode(buf, ctx)
+                        .map(|opt| opt.map(PgWireFrontendMessage::GssEncRequest))
                 } else {
                     // startup
                     startup::Startup::decode(buf, ctx).map(|v| v.map(Self::Startup))
@@ -215,7 +254,7 @@ impl PgWireFrontendMessage {
             match first_byte {
                 // Password, SASLInitialResponse, SASLResponse can only be
                 // decoded under certain context
-                startup::MESSAGE_TYPE_BYTE_PASWORD_MESSAGE_FAMILY => {
+                startup::MESSAGE_TYPE_BYTE_PASSWORD_MESSAGE_FAMILY => {
                     startup::PasswordMessageFamily::decode(buf, ctx)
                         .map(|v| v.map(Self::PasswordMessageFamily))
                 }
@@ -271,6 +310,8 @@ impl PgWireFrontendMessage {
 #[derive(Debug)]
 pub enum PgWireBackendMessage {
     // startup
+    SslResponse(response::SslResponse),
+    GssEncResponse(response::GssEncResponse),
     Authentication(startup::Authentication),
     ParameterStatus(startup::ParameterStatus),
     BackendKeyData(startup::BackendKeyData),
@@ -288,7 +329,6 @@ pub enum PgWireBackendMessage {
     ReadyForQuery(response::ReadyForQuery),
     ErrorResponse(response::ErrorResponse),
     NoticeResponse(response::NoticeResponse),
-    SslResponse(response::SslResponse),
     NotificationResponse(response::NotificationResponse),
 
     // data
@@ -309,6 +349,8 @@ pub enum PgWireBackendMessage {
 impl PgWireBackendMessage {
     pub fn encode(&self, buf: &mut BytesMut) -> PgWireResult<()> {
         match self {
+            Self::SslResponse(msg) => msg.encode(buf),
+            Self::GssEncResponse(msg) => msg.encode(buf),
             Self::Authentication(msg) => msg.encode(buf),
             Self::ParameterStatus(msg) => msg.encode(buf),
             Self::BackendKeyData(msg) => msg.encode(buf),
@@ -324,7 +366,6 @@ impl PgWireBackendMessage {
             Self::ReadyForQuery(msg) => msg.encode(buf),
             Self::ErrorResponse(msg) => msg.encode(buf),
             Self::NoticeResponse(msg) => msg.encode(buf),
-            Self::SslResponse(msg) => msg.encode(buf),
             Self::NotificationResponse(msg) => msg.encode(buf),
 
             Self::ParameterDescription(msg) => msg.encode(buf),
@@ -478,6 +519,13 @@ mod test {
 
         ctx.awaiting_ssl = false;
         roundtrip!(s, Startup, &ctx);
+
+        let mut s_too_large = Startup::default();
+        s_too_large
+            .parameters
+            .insert("user".to_owned(), "a".repeat(10000));
+        let mut buffer = BytesMut::new();
+        assert!(s_too_large.encode(&mut buffer).is_err());
     }
 
     #[test]
@@ -551,6 +599,10 @@ mod test {
 
         let cc = CommandComplete::new("DELETE 5".to_owned());
         roundtrip!(cc, CommandComplete, &ctx);
+
+        let cc = CommandComplete::new("DELETE 5".repeat(10_000));
+        let mut buffer = BytesMut::new();
+        assert!(cc.encode(&mut buffer).is_err());
     }
 
     #[test]
@@ -758,6 +810,24 @@ mod test {
         roundtrip!(sslaccept, SslResponse, &ctx);
         let sslrefuse = SslResponse::Refuse;
         roundtrip!(sslrefuse, SslResponse, &ctx);
+    }
+
+    #[test]
+    fn test_gssencrequest() {
+        let ctx = DecodeContext::new(ProtocolVersion::PROTOCOL3_0);
+
+        let sslreq = GssEncRequest::new();
+        roundtrip!(sslreq, GssEncRequest, &ctx);
+    }
+
+    #[test]
+    fn test_gssencresponse() {
+        let ctx = DecodeContext::new(ProtocolVersion::PROTOCOL3_0);
+
+        let gssenc_accept = GssEncResponse::Accept;
+        roundtrip!(gssenc_accept, GssEncResponse, &ctx);
+        let gssenc_refuse = GssEncResponse::Refuse;
+        roundtrip!(gssenc_refuse, GssEncResponse, &ctx);
     }
 
     #[test]

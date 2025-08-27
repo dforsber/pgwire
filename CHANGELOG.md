@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic
 Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.32.1] - 2025-08-12
+
+### Fixed
+
+- Correct packet length check [#295]
+- Potential panic on direct TLS when it is not configured [#296]
+- Timeout on getting startup message on Windows [#297]
+
+## [0.32.0] - 2025-08-07
+
+### Added
+
+- Added support for GSSAPI handshake. This fixes connection issue with psql 14
+  homebrew on Mac. [#290]
+- Added authentication timeout (60s). Unauthenticated connection will be dropped
+  after timeout. [#293]
+- Added validation on packet length. [#292]
+
+### Changed
+
+- Corrected typo for `MESSAGE_TYPE_BYTE_PASSWORD_MESSAGE_FAMILY`
+
 ## [0.31.1] - 2025-07-31
 
 ### Added

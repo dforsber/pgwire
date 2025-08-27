@@ -14,16 +14,26 @@ pub enum PgWireError {
     InvalidSecretKey,
     #[error("Invalid message recevied, received {0}")]
     InvalidMessageType(u8),
+    #[error("Invalid message length, expected max {0}, actual: {1}")]
+    MessageTooLarge(usize, usize),
     #[error("Invalid target type, received {0}")]
     InvalidTargetType(u8),
     #[error("Invalid transaction status, received {0}")]
     InvalidTransactionStatus(u8),
     #[error("Invalid ssl request message")]
     InvalidSSLRequestMessage,
+    #[error("Invalid gss encrypt request message")]
+    InvalidGssEncRequestMessage,
     #[error("Invalid startup message")]
     InvalidStartupMessage,
     #[error("Invalid authentication message code: {0}")]
     InvalidAuthenticationMessageCode(i32),
+    #[error("Invalid password message type, failed to coerce")]
+    FailedToCoercePasswordMessage,
+    #[error("Invalid SASL state")]
+    InvalidSASLState,
+    #[error("Unsupported SASL authentication method {0}")]
+    UnsupportedSASLAuthMethod(String),
     #[error(transparent)]
     IoError(#[from] std::io::Error),
     #[error("Portal not found for name: {0}")]
@@ -240,16 +250,31 @@ impl From<PgWireError> for ErrorInfo {
             PgWireError::InvalidTargetType(_) => {
                 ErrorInfo::new("FATAL".to_owned(), "08P01".to_owned(), error.to_string())
             }
+            PgWireError::MessageTooLarge(..) => {
+                ErrorInfo::new("FATAL".to_owned(), "08P01".to_owned(), error.to_string())
+            }
             PgWireError::InvalidTransactionStatus(_) => {
                 ErrorInfo::new("FATAL".to_owned(), "08P01".to_owned(), error.to_string())
             }
             PgWireError::InvalidSSLRequestMessage => {
                 ErrorInfo::new("FATAL".to_owned(), "08P01".to_owned(), error.to_string())
             }
+            PgWireError::InvalidGssEncRequestMessage => {
+                ErrorInfo::new("FATAL".to_owned(), "08P01".to_owned(), error.to_string())
+            }
             PgWireError::InvalidStartupMessage => {
                 ErrorInfo::new("FATAL".to_owned(), "08P01".to_owned(), error.to_string())
             }
             PgWireError::InvalidAuthenticationMessageCode(_) => {
+                ErrorInfo::new("FATAL".to_owned(), "08P01".to_owned(), error.to_string())
+            }
+            PgWireError::FailedToCoercePasswordMessage => {
+                ErrorInfo::new("FATAL".to_owned(), "XX000".to_owned(), error.to_string())
+            }
+            PgWireError::InvalidSASLState => {
+                ErrorInfo::new("FATAL".to_owned(), "XX000".to_owned(), error.to_string())
+            }
+            PgWireError::UnsupportedSASLAuthMethod(_) => {
                 ErrorInfo::new("FATAL".to_owned(), "08P01".to_owned(), error.to_string())
             }
             PgWireError::IoError(_) => {

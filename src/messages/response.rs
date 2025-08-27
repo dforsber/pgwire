@@ -19,6 +19,11 @@ impl Message for CommandComplete {
         Some(MESSAGE_TYPE_BYTE_COMMAND_COMPLETE)
     }
 
+    #[inline]
+    fn max_message_length() -> usize {
+        super::SMALL_BACKEND_PACKET_SIZE_LIMIT
+    }
+
     fn message_length(&self) -> usize {
         5 + self.tag.len()
     }
@@ -45,6 +50,11 @@ pub const MESSAGE_TYPE_BYTE_EMPTY_QUERY_RESPONSE: u8 = b'I';
 impl Message for EmptyQueryResponse {
     fn message_type() -> Option<u8> {
         Some(MESSAGE_TYPE_BYTE_EMPTY_QUERY_RESPONSE)
+    }
+
+    #[inline]
+    fn max_message_length() -> usize {
+        super::SMALL_BACKEND_PACKET_SIZE_LIMIT
     }
 
     fn message_length(&self) -> usize {
@@ -91,6 +101,11 @@ impl Message for ReadyForQuery {
     }
 
     #[inline]
+    fn max_message_length() -> usize {
+        super::SMALL_BACKEND_PACKET_SIZE_LIMIT
+    }
+
+    #[inline]
     fn message_length(&self) -> usize {
         5
     }
@@ -132,6 +147,11 @@ impl Message for ErrorResponse {
     #[inline]
     fn message_type() -> Option<u8> {
         Some(MESSAGE_TYPE_BYTE_ERROR_RESPONSE)
+    }
+
+    #[inline]
+    fn max_message_length() -> usize {
+        super::LONG_BACKEND_PACKET_SIZE_LIMIT
     }
 
     fn message_length(&self) -> usize {
@@ -177,6 +197,11 @@ impl Message for NoticeResponse {
     #[inline]
     fn message_type() -> Option<u8> {
         Some(MESSAGE_TYPE_BYTE_NOTICE_RESPONSE)
+    }
+
+    #[inline]
+    fn max_message_length() -> usize {
+        super::LONG_BACKEND_PACKET_SIZE_LIMIT
     }
 
     fn message_length(&self) -> usize {
@@ -269,6 +294,61 @@ impl Message for SslResponse {
     }
 }
 
+/// Response to GssEncRequest.
+#[non_exhaustive]
+#[derive(Debug, PartialEq)]
+pub enum GssEncResponse {
+    Accept,
+    Refuse,
+}
+
+impl GssEncResponse {
+    pub const BYTE_ACCEPT: u8 = b'G';
+    pub const BYTE_REFUSE: u8 = b'N';
+    // The whole message takes only one byte and has no size field.
+    pub const MESSAGE_LENGTH: usize = 1;
+}
+
+impl Message for GssEncResponse {
+    fn message_length(&self) -> usize {
+        Self::MESSAGE_LENGTH
+    }
+
+    fn encode_body(&self, buf: &mut BytesMut) -> PgWireResult<()> {
+        match self {
+            Self::Accept => buf.put_u8(Self::BYTE_ACCEPT),
+            Self::Refuse => buf.put_u8(Self::BYTE_REFUSE),
+        }
+        Ok(())
+    }
+
+    fn encode(&self, buf: &mut BytesMut) -> PgWireResult<()> {
+        self.encode_body(buf)
+    }
+
+    fn decode_body(_: &mut BytesMut, _: usize, _ctx: &DecodeContext) -> PgWireResult<Self> {
+        unreachable!()
+    }
+
+    fn decode(buf: &mut BytesMut, _ctx: &DecodeContext) -> PgWireResult<Option<Self>> {
+        if buf.remaining() >= Self::MESSAGE_LENGTH {
+            match buf[0] {
+                Self::BYTE_ACCEPT => {
+                    buf.advance(Self::MESSAGE_LENGTH);
+                    Ok(Some(Self::Accept))
+                }
+                Self::BYTE_REFUSE => {
+                    buf.advance(Self::MESSAGE_LENGTH);
+                    Ok(Some(Self::Refuse))
+                }
+                _ => Ok(None),
+            }
+        } else {
+            Ok(None)
+        }
+    }
+}
+
 /// NotificationResponse
 #[non_exhaustive]
 #[derive(PartialEq, Eq, Debug, Default, new)]
@@ -284,6 +364,11 @@ impl Message for NotificationResponse {
     #[inline]
     fn message_type() -> Option<u8> {
         Some(MESSAGE_TYPE_BYTE_NOTIFICATION_RESPONSE)
+    }
+
+    #[inline]
+    fn max_message_length() -> usize {
+        super::LONG_BACKEND_PACKET_SIZE_LIMIT
     }
 
     fn message_length(&self) -> usize {

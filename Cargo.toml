@@ -1,6 +1,6 @@
 [package]
 name = "pgwire"
-version = "0.31.1"
+version = "0.32.1"
 edition = "2021"
 authors = ["Ning Sun <sunng@pm.me>"]
 license = "MIT/Apache-2.0"
@@ -22,7 +22,8 @@ tokio = { version = "1.19", features = [
     "net",
     "rt",
     "io-util",
-    "macros"
+    "macros",
+    "time"
 ], optional = true }
 tokio-util = { version = "0.7.3", features = ["codec", "io"], optional = true }
 tokio-rustls = { version = "0.26.2", optional = true, default-features = false, features = ["logging", "tls12"]}
@@ -39,7 +40,7 @@ base64 = { version = "0.22", optional = true }
 ring = { version = "0.17", optional = true }
 aws-lc-rs = { version = "1.7", optional = true }
 stringprep = { version = "0.1.2", optional = true }
-x509-certificate = { version = "0.24", optional = true }
+x509-certificate = { version = "0.25", optional = true }
 ## types
 postgres-types = { version = "0.2", features = [
     "with-chrono-0_4",
@@ -53,8 +54,22 @@ percent-encoding = { version = "2.0", optional = true }
 
 [features]
 default = ["server-api-aws-lc-rs"]
-_ring = ["dep:ring", "tokio-rustls/ring", "dep:rustls-pki-types"]
-_aws-lc-rs = ["dep:aws-lc-rs", "tokio-rustls/aws-lc-rs", "dep:rustls-pki-types"]
+_ring = [
+  "dep:ring",
+  "tokio-rustls/ring",
+  "dep:rustls-pki-types",
+  "dep:base64",
+  "dep:stringprep",
+  "dep:x509-certificate",
+]
+_aws-lc-rs = [
+  "dep:aws-lc-rs",
+  "tokio-rustls/aws-lc-rs",
+  "dep:rustls-pki-types",
+  "dep:base64",
+  "dep:stringprep",
+  "dep:x509-certificate"
+]
 server-api = [
     "dep:tokio",
     "dep:tokio-util",
@@ -80,7 +95,6 @@ client-api = [
 ]
 client-api-ring = ["client-api", "_ring", "dep:rustls-pki-types"]
 client-api-aws-lc-rs = ["client-api", "_aws-lc-rs", "dep:rustls-pki-types"]
-scram = ["dep:base64", "dep:stringprep", "dep:x509-certificate"]
 _duckdb = []
 _sqlite = []
 _bundled = ["duckdb/bundled", "rusqlite/bundled"]
@@ -91,7 +105,7 @@ rustls-pki-types = { version = "1.10" }
 rusqlite = { version = "0.37.0", features = ["column_decltype"] }
 ## for duckdb example
 duckdb = { version = "1.0.0" }
-arrow-pg = "0.*"
+arrow-pg = "0.4.1"
 
 ## for loading custom cert files
 rustls-pemfile = "2.0"
@@ -139,7 +153,7 @@ required-features = ["server-api-aws-lc-rs"]
 
 [[example]]
 name = "scram"
-required-features = ["server-api-aws-lc-rs", "scram"]
+required-features = ["server-api-aws-lc-rs"]
 
 [[example]]
 name = "transaction"

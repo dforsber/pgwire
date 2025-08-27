@@ -28,15 +28,16 @@ this library.
 - Frontend-Backend interaction over TCP
   - [x] SSL Request and Response
     - [x] PostgreSQL 17 direct SSL negotiation
+  - [x] GSSAPI Request and Response: GSSAPI encryption is not supported
   - [x] Startup
     - [x] Protocol negotiation
     - [x] No authentication
     - [x] Clear-text password authentication
     - [x] Md5 Password authentication
-    - [x] SASL SCRAM authentication (optional feature `server-api-scram-ring` or
-          `server-api-scram-aws-lc-rs`)
+    - [x] SASL SCRAM authentication
       - [x] SCRAM-SHA-256
       - [x] SCRAM-SHA-256-PLUS
+    - [ ] SASL OAUTH
   - [x] Simple Query and Response
   - [x] Extended Query and Response
     - [x] Parse
@@ -168,6 +169,18 @@ application development, you can use
   resilient workflow
 
 Submit a pull request if your project isn't listed here.
+
+## Community
+
+### Developer Mailing List
+
+If you like the idea of pgwire and want to join the development of the library,
+or its ecosystem integrations, extensions, you are welcomed to join our
+developer mailing list: https://groups.io/g/pgwire-dev/
+
+### Github Discussion
+
+Github discussion of this repo is also open for more generate questions.
 
 ## License
 
