@@ -332,6 +332,9 @@ async fn peek_for_sslrequest<ST>(
         let mut gss_done = false;
 
         loop {
+            // Yield control to prevent CPU spinning during SSL negotiation
+            tokio::task::yield_now().await;
+            
             let buf = socket.get_mut().fill_buf().await?;
             let n = buf.len();
 
@@ -409,6 +412,10 @@ where
     socket.set_state(PgWireConnectionState::AwaitingStartup);
 
     loop {
+        // Yield control periodically to prevent CPU spinning on partial/slow data
+        // This is critical for handling misbehaving clients that send data slowly
+        tokio::task::yield_now().await;
+        
         let msg = if matches!(
             socket.state(),
             PgWireConnectionState::AwaitingStartup
