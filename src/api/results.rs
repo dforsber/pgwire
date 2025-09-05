@@ -175,6 +175,8 @@ pub struct QueryResponse<'a> {
     command_tag: String,
     row_schema: Arc<Vec<FieldInfo>>,
     data_rows: BoxStream<'a, PgWireResult<DataRow>>,
+    /// Indicates if the portal should be suspended (more rows available beyond max_rows limit)
+    pub portal_suspended: bool,
 }
 
 impl<'a> QueryResponse<'a> {
@@ -188,6 +190,7 @@ impl<'a> QueryResponse<'a> {
             command_tag: "SELECT".to_owned(),
             row_schema: field_defs,
             data_rows: row_stream.boxed(),
+            portal_suspended: false,  // Default to complete (not suspended)
         }
     }
 
@@ -199,6 +202,11 @@ impl<'a> QueryResponse<'a> {
     /// Set the command tag
     pub fn set_command_tag(&mut self, command_tag: &str) {
         command_tag.clone_into(&mut self.command_tag);
+    }
+
+    /// Set the portal suspended flag
+    pub fn set_portal_suspended(&mut self, suspended: bool) {
+        self.portal_suspended = suspended;
     }
 
     /// Get schema of columns

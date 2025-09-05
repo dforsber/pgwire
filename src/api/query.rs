@@ -19,7 +19,7 @@ use crate::error::{ErrorInfo, PgWireError, PgWireResult};
 use crate::messages::data::{NoData, ParameterDescription};
 use crate::messages::extendedquery::{
     Bind, BindComplete, Close, CloseComplete, Describe, Execute, Flush, Parse, ParseComplete,
-    Sync as PgSync, TARGET_TYPE_BYTE_PORTAL, TARGET_TYPE_BYTE_STATEMENT,
+    PortalSuspended, Sync as PgSync, TARGET_TYPE_BYTE_PORTAL, TARGET_TYPE_BYTE_STATEMENT,
 };
 use crate::messages::response::{
     EmptyQueryResponse, NoticeResponse, ReadyForQuery, TransactionStatus,
@@ -492,6 +492,7 @@ where
 {
     let command_tag = results.command_tag().to_owned();
     let row_schema = results.row_schema();
+    let portal_suspended = results.portal_suspended;
     let mut data_rows = results.data_rows();
 
     // Simple query has row_schema in query response. For extended query,
@@ -510,10 +511,21 @@ where
         client.feed(PgWireBackendMessage::DataRow(row)).await?;
     }
 
-    let tag = Tag::new(&command_tag).with_rows(rows);
-    client
-        .send(PgWireBackendMessage::CommandComplete(tag.into()))
-        .await?;
+    // Send either PortalSuspended or CommandComplete based on the flag
+    if portal_suspended {
+        // Portal is suspended - more rows available beyond max_rows limit
+        info!("📤 Sending PortalSuspended (rows sent: {})", rows);
+        client
+            .send(PgWireBackendMessage::PortalSuspended(PortalSuspended))
+            .await?;
+    } else {
+        // Query complete - all rows have been sent
+        info!("📤 Sending CommandComplete (rows sent: {})", rows);
+        let tag = Tag::new(&command_tag).with_rows(rows);
+        client
+            .send(PgWireBackendMessage::CommandComplete(tag.into()))
+            .await?;
+    }
 
     Ok(())
 }
