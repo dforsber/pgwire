@@ -126,7 +126,7 @@ impl ScramAuth {
                         ClientFirst::try_new(String::from_utf8_lossy(data).as_ref())
                     })?;
 
-                let salt_and_salted_pass = self
+                let password = self
                     .auth_db
                     .get_password(&LoginInfo::from_client_info(client))
                     .await?;
@@ -137,18 +137,13 @@ impl ScramAuth {
 
                 let server_first = ServerFirst::new(
                     new_nonce,
-                    STANDARD.encode(
-                        salt_and_salted_pass
-                            .salt
-                            .as_ref()
-                            .expect("Salt required for SCRAM auth source"),
-                    ),
+                    STANDARD.encode(password.salt()),
                     self.iterations,
                 );
                 let server_first_message = server_first.message();
 
                 let next_state = SASLState::ScramServerFirstSent(
-                    salt_and_salted_pass,
+                    password,
                     client_first.channel_binding(),
                     format!("{},{}", client_first.bare(), &server_first_message),
                 );
@@ -157,7 +152,7 @@ impl ScramAuth {
                 Ok((resp, next_state))
             }
             SASLState::ScramServerFirstSent(
-                ref salt_and_salted_pass,
+                ref password,
                 ref channel_binding_prefix,
                 ref partial_auth_msg,
             ) => {
@@ -169,18 +164,38 @@ impl ScramAuth {
                 let channel_binding = self.compute_channel_binding(channel_binding_prefix);
                 client_final.validate_channel_binding(&channel_binding)?;
 
-                let salted_password = &salt_and_salted_pass.password;
-                let client_key = hmac(salted_password.as_ref(), b"Client Key");
-                let stored_key = h(client_key.as_ref());
+                // Use stored_key and server_key directly from the Password struct
+                // This is the PostgreSQL-compatible approach - no salted_password needed
+                let stored_key = password.stored_key();
+                let server_key = password.server_key();
+
                 let auth_msg = format!("{},{}", partial_auth_msg, client_final.without_proof());
-                let client_signature = hmac(stored_key.as_ref(), auth_msg.as_bytes());
+                let client_signature = hmac(stored_key, auth_msg.as_bytes());
 
-                let computed_client_proof =
-                    STANDARD.encode(xor(client_key.as_ref(), client_signature.as_ref()).as_slice());
+                // Decode the client's proof
+                let client_proof_bytes = STANDARD.decode(&client_final.proof)
+                    .map_err(|e| PgWireError::UserError(Box::new(
+                        crate::error::ErrorInfo::new(
+                            "FATAL".to_string(),
+                            "28P01".to_string(),
+                            format!("Invalid base64 in client proof: {}", e),
+                        )
+                    )))?;
 
-                if computed_client_proof == client_final.proof {
-                    let server_key = hmac(salted_password.as_ref(), b"Server Key");
-                    let server_signature = hmac(server_key.as_ref(), auth_msg.as_bytes());
+                // To verify: client_key = client_proof XOR client_signature
+                // Then: stored_key_check = H(client_key)
+                // Compare stored_key_check with our stored_key
+                let client_key: Vec<u8> = client_proof_bytes
+                    .iter()
+                    .zip(client_signature.iter())
+                    .map(|(a, b)| a ^ b)
+                    .collect();
+
+                let computed_stored_key = h(&client_key);
+
+                if computed_stored_key.as_ref() as &[u8] == stored_key {
+                    // Authentication successful - compute server proof
+                    let server_signature = hmac(server_key, auth_msg.as_bytes());
                     let server_final = ServerFinalSuccess::new(STANDARD.encode(server_signature));
 
                     let new_state = SASLState::Finished;

@@ -85,30 +85,89 @@ impl ServerParameterProvider for DefaultServerParameterProvider {
     }
 }
 
-#[derive(Debug, new, Clone)]
+/// Password storage for SCRAM authentication
+/// Following PostgreSQL's approach: only store salt, stored_key, and server_key
+/// Never store the salted_password for security
+#[derive(Debug, Clone)]
 pub struct Password {
-    salt: Option<Vec<u8>>,
-    password: Vec<u8>,
+    pub salt: Vec<u8>,
+    pub stored_key: Vec<u8>,
+    pub server_key: Vec<u8>,
 }
 
 impl Password {
-    pub fn salt(&self) -> Option<&[u8]> {
-        self.salt.as_deref()
+    /// Create a new SCRAM verifier (PostgreSQL-compatible)
+    pub fn new(salt: Vec<u8>, stored_key: Vec<u8>, server_key: Vec<u8>) -> Self {
+        Password {
+            salt,
+            stored_key,
+            server_key,
+        }
     }
 
+    /// Create from salted_password (computes stored_key and server_key)
+    pub fn from_salted_password(salt: Vec<u8>, salted_password: &[u8]) -> Self {
+        #[cfg(feature = "_aws-lc-rs")]
+        use aws_lc_rs::{digest, hmac};
+        #[cfg(feature = "_ring")]
+        use ring::{digest, hmac};
+
+        // Calculate ClientKey = HMAC(SaltedPassword, "Client Key")
+        let client_key_tag = hmac::sign(
+            &hmac::Key::new(hmac::HMAC_SHA256, salted_password),
+            b"Client Key"
+        );
+        let client_key = client_key_tag.as_ref();
+
+        // Calculate StoredKey = H(ClientKey)
+        let stored_key_digest = digest::digest(&digest::SHA256, client_key);
+        let stored_key = stored_key_digest.as_ref().to_vec();
+
+        // Calculate ServerKey = HMAC(SaltedPassword, "Server Key")
+        let server_key_tag = hmac::sign(
+            &hmac::Key::new(hmac::HMAC_SHA256, salted_password),
+            b"Server Key"
+        );
+        let server_key = server_key_tag.as_ref().to_vec();
+
+        Password {
+            salt,
+            stored_key,
+            server_key,
+        }
+    }
+
+    pub fn salt(&self) -> &[u8] {
+        &self.salt
+    }
+
+    pub fn stored_key(&self) -> &[u8] {
+        &self.stored_key
+    }
+
+    pub fn server_key(&self) -> &[u8] {
+        &self.server_key
+    }
+
+    // Deprecated: for backward compatibility only
     pub fn password(&self) -> &[u8] {
-        &self.password
+        // This should not be used anymore
+        panic!("Password::password() is deprecated - use stored_key() and server_key() instead")
     }
 }
 
-#[derive(Debug, new)]
+#[derive(Debug)]
 pub struct LoginInfo<'a> {
     user: Option<&'a str>,
     database: Option<&'a str>,
     host: String,
 }
 
-impl LoginInfo<'_> {
+impl<'a> LoginInfo<'a> {
+    pub fn new(user: Option<&'a str>, database: Option<&'a str>, host: String) -> Self {
+        LoginInfo { user, database, host }
+    }
+
     pub fn user(&self) -> Option<&str> {
         self.user
     }

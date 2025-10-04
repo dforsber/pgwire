@@ -42,17 +42,9 @@ impl<V: AuthSource, P: ServerParameterProvider> StartupHandler
                     ))
                     .await?;
             }
-            PgWireFrontendMessage::PasswordMessageFamily(pwd) => {
-                let pwd = pwd.into_password()?;
-                let login_info = LoginInfo::from_client_info(client);
-                let pass = self.auth_source.get_password(&login_info).await?;
-                if pass.password == pwd.password.as_bytes() {
-                    super::finish_authentication(client, &self.parameter_provider).await?;
-                } else {
-                    return Err(PgWireError::InvalidPassword(
-                        login_info.user().map(|x| x.to_owned()).unwrap_or_default(),
-                    ));
-                }
+            PgWireFrontendMessage::PasswordMessageFamily(_pwd) => {
+                // Cleartext authentication is insecure and doesn't work with SCRAM verifiers
+                panic!("Cleartext authentication is not supported with SCRAM verifiers. Use SCRAM-SHA-256 instead.");
             }
             _ => {}
         }

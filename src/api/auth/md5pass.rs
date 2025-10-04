@@ -49,24 +49,8 @@ impl<A: AuthSource, P: ServerParameterProvider> StartupHandler
                 super::save_startup_parameters_to_metadata(client, startup);
                 client.set_state(PgWireConnectionState::AuthenticationInProgress);
 
-                let login_info = LoginInfo::from_client_info(client);
-                let salt_and_pass = self.auth_source.get_password(&login_info).await?;
-
-                let salt = salt_and_pass
-                    .salt
-                    .as_ref()
-                    .expect("Salt is required for Md5Password authentication");
-
-                self.cached_password
-                    .lock()
-                    .await
-                    .clone_from(&salt_and_pass.password);
-
-                client
-                    .send(PgWireBackendMessage::Authentication(
-                        Authentication::MD5Password(salt.clone()),
-                    ))
-                    .await?;
+                // MD5 authentication is deprecated and doesn't work with SCRAM verifiers
+                panic!("MD5 authentication is not supported with SCRAM verifiers. Use SCRAM-SHA-256 instead.");
             }
             PgWireFrontendMessage::PasswordMessageFamily(pwd) => {
                 let pwd = pwd.into_password()?;
