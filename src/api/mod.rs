@@ -4,11 +4,12 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 pub use postgres_types::Type;
 #[cfg(any(feature = "_ring", feature = "_aws-lc-rs"))]
 use rustls_pki_types::CertificateDer;
 
-use crate::error::PgWireError;
+use crate::error::{PgWireError, PgWireResult};
 use crate::messages::response::TransactionStatus;
 use crate::messages::startup::SecretKey;
 use crate::messages::ProtocolVersion;
@@ -168,6 +169,17 @@ impl<S> ClientPortalStore for DefaultClient<S> {
     fn portal_store(&self) -> &Self::PortalStore {
         &self.portal_store
     }
+}
+
+/// Trait for writing raw PostgreSQL protocol bytes directly to the client stream.
+/// This bypasses the codec and is used for binary protocol relay (e.g., proxying to backend PostgreSQL).
+#[async_trait]
+pub trait RawBytesWriter: Send {
+    /// Write raw bytes directly to the underlying stream
+    async fn write_raw_bytes(&mut self, bytes: &[u8]) -> PgWireResult<()>;
+
+    /// Read raw bytes directly from the underlying stream
+    async fn read_raw_bytes(&mut self, buf: &mut [u8]) -> PgWireResult<usize>;
 }
 
 /// A centralized handler for all errors

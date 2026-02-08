@@ -5,7 +5,7 @@ pub mod client;
 mod server;
 
 #[cfg(feature = "server-api")]
-pub use server::process_socket;
+pub use server::{process_socket, PgWireMessageServerCodec};
 
 #[cfg(any(feature = "_ring", feature = "_aws-lc-rs"))]
 pub use tokio_rustls;

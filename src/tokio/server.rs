@@ -141,6 +141,34 @@ impl<T: 'static, S> ClientInfo for Framed<T, PgWireMessageServerCodec<S>> {
     }
 }
 
+use crate::api::RawBytesWriter;
+use async_trait::async_trait;
+
+#[async_trait]
+impl<T, S> RawBytesWriter for Framed<T, PgWireMessageServerCodec<S>>
+where
+    T: tokio::io::AsyncWrite + tokio::io::AsyncRead + Unpin + Send,
+    S: Send + Sync,
+{
+    async fn write_raw_bytes(&mut self, bytes: &[u8]) -> crate::error::PgWireResult<()> {
+        use tokio::io::AsyncWriteExt;
+        let writer = self.get_mut();
+        writer.write_all(bytes).await
+            .map_err(|e| crate::error::PgWireError::IoError(e))?;
+        writer.flush().await
+            .map_err(|e| crate::error::PgWireError::IoError(e))?;
+        Ok(())
+    }
+
+    async fn read_raw_bytes(&mut self, buf: &mut [u8]) -> crate::error::PgWireResult<usize> {
+        use tokio::io::AsyncReadExt;
+        let reader = self.get_mut();
+        let n = reader.read(buf).await
+            .map_err(|e| crate::error::PgWireError::IoError(e))?;
+        Ok(n)
+    }
+}
+
 impl<T, S> ClientPortalStore for Framed<T, PgWireMessageServerCodec<S>> {
     type PortalStore = <DefaultClient<S> as ClientPortalStore>::PortalStore;
 
