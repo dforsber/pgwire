@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use tracing::info;
 use futures::sink::{Sink, SinkExt};
 use futures::stream::StreamExt;
+use tokio::io::AsyncWriteExt;
 
 use super::portal::Portal;
 use super::results::{into_row_description, Tag};
@@ -32,6 +33,8 @@ fn is_empty_query(q: &str) -> bool {
     trimmed_query == ";" || trimmed_query.is_empty()
 }
 
+use super::RawBytesWriter;
+
 /// handler for processing simple query.
 #[async_trait]
 pub trait SimpleQueryHandler: Send + Sync {
@@ -43,7 +46,7 @@ pub trait SimpleQueryHandler: Send + Sync {
     /// or `;`, it returns `EmptyQueryResponse` and does not call `self.do_query`.
     async fn on_query<C>(&self, client: &mut C, query: Query) -> PgWireResult<()>
     where
-        C: ClientInfo + ClientPortalStore + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C: ClientInfo + ClientPortalStore + RawBytesWriter + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
@@ -55,7 +58,7 @@ pub trait SimpleQueryHandler: Send + Sync {
     /// call this function.
     async fn _on_query<C>(&self, client: &mut C, query: Query) -> PgWireResult<()>
     where
-        C: ClientInfo + ClientPortalStore + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C: ClientInfo + ClientPortalStore + RawBytesWriter + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
@@ -138,7 +141,7 @@ pub trait SimpleQueryHandler: Send + Sync {
     /// Provide your query implementation using the incoming query string.
     async fn do_query<'a, C>(&self, client: &mut C, query: &str) -> PgWireResult<Vec<Response<'a>>>
     where
-        C: ClientInfo + ClientPortalStore + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C: ClientInfo + ClientPortalStore + RawBytesWriter + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>;
 }
@@ -157,7 +160,21 @@ pub trait ExtendedQueryHandler: Send + Sync {
     /// stores it in `Self::PortalStore`.
     async fn on_parse<C>(&self, client: &mut C, message: Parse) -> PgWireResult<()>
     where
-        C: ClientInfo + ClientPortalStore + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C: ClientInfo + ClientPortalStore + RawBytesWriter + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C::PortalStore: PortalStore<Statement = Self::Statement>,
+        C::Error: Debug,
+        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+    {
+        self._on_parse(client, message).await
+    }
+
+    /// The default implementation of `on_parse`.
+    ///
+    /// If you are writing pre/post processing for parse, you can reference
+    /// this implementation by `self._on_parse(...)`
+    async fn _on_parse<C>(&self, client: &mut C, message: Parse) -> PgWireResult<()>
+    where
+        C: ClientInfo + ClientPortalStore + RawBytesWriter + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
         C::PortalStore: PortalStore<Statement = Self::Statement>,
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
@@ -166,7 +183,7 @@ pub trait ExtendedQueryHandler: Send + Sync {
         info!("   Statement name: {:?}", message.name);
         info!("   Query: {}", message.query);
         info!("   Type OIDs: {:?}", message.type_oids);
-        
+
         let parser = self.query_parser();
         let stmt = match StoredStatement::parse(client, &message, parser).await {
             Ok(stmt) => stmt,
@@ -175,12 +192,12 @@ pub trait ExtendedQueryHandler: Send + Sync {
                 return Err(e);
             }
         };
-        
+
         client.portal_store().put_statement(Arc::new(stmt));
         client
             .send(PgWireBackendMessage::ParseComplete(ParseComplete::new()))
             .await?;
-        
+
         info!("✅ COMPLETED: Parse phase successfully - ParseComplete sent");
         Ok(())
     }
@@ -191,18 +208,35 @@ pub trait ExtendedQueryHandler: Send + Sync {
     /// statement and stores in `Self::PortalStore` as well.
     async fn on_bind<C>(&self, client: &mut C, message: Bind) -> PgWireResult<()>
     where
-        C: ClientInfo + ClientPortalStore + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C: ClientInfo + ClientPortalStore + RawBytesWriter + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
         C::PortalStore: PortalStore<Statement = Self::Statement>,
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
-        info!("📨 EXTENDED QUERY PROTOCOL - Bind Message:");
-        info!("   Portal name: {:?}", message.portal_name);
-        info!("   Statement name: {:?}", message.statement_name);
-        info!("   Parameter formats: {:?}", message.parameter_format_codes);
-        info!("   Parameters count: {}", message.parameters.len());
-        info!("   Result formats: {:?}", message.result_column_format_codes);
-        
+        self._on_bind(client, message).await
+    }
+
+    /// The default implementation of `on_bind`.
+    ///
+    /// If you are writing pre/post processing for bind, you can reference
+    /// this implementation by `self._on_bind(...)`
+    async fn _on_bind<C>(&self, client: &mut C, message: Bind) -> PgWireResult<()>
+    where
+        C: ClientInfo + ClientPortalStore + RawBytesWriter + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C::PortalStore: PortalStore<Statement = Self::Statement>,
+        C::Error: Debug,
+        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+    {
+        #[cfg(debug_assertions)]
+        {
+            info!("📨 EXTENDED QUERY PROTOCOL - Bind Message:");
+            info!("   Portal name: {:?}", message.portal_name);
+            info!("   Statement name: {:?}", message.statement_name);
+            info!("   Parameter formats: {:?}", message.parameter_format_codes);
+            info!("   Parameters count: {}", message.parameters.len());
+            info!("   Result formats: {:?}", message.result_column_format_codes);
+        }
+
         let statement_name = message.statement_name.as_deref().unwrap_or(DEFAULT_NAME);
 
         if let Some(statement) = client.portal_store().get_statement(statement_name) {
@@ -213,12 +247,13 @@ pub trait ExtendedQueryHandler: Send + Sync {
                     return Err(e);
                 }
             };
-            
+
             client.portal_store().put_portal(Arc::new(portal));
             client
                 .send(PgWireBackendMessage::BindComplete(BindComplete::new()))
                 .await?;
-            
+
+            #[cfg(debug_assertions)]
             info!("✅ COMPLETED: Bind phase successfully - BindComplete sent");
             Ok(())
         } else {
@@ -238,7 +273,7 @@ pub trait ExtendedQueryHandler: Send + Sync {
     /// `Self::Statement`.
     async fn on_execute<C>(&self, client: &mut C, message: Execute) -> PgWireResult<()>
     where
-        C: ClientInfo + ClientPortalStore + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C: ClientInfo + ClientPortalStore + RawBytesWriter + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
         C::PortalStore: PortalStore<Statement = Self::Statement>,
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
@@ -252,7 +287,7 @@ pub trait ExtendedQueryHandler: Send + Sync {
     /// reference this implementation by calling `self._on_execute(...)`.
     async fn _on_execute<C>(&self, client: &mut C, message: Execute) -> PgWireResult<()>
     where
-        C: ClientInfo + ClientPortalStore + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C: ClientInfo + ClientPortalStore + RawBytesWriter + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
         C::PortalStore: PortalStore<Statement = Self::Statement>,
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
@@ -327,7 +362,7 @@ pub trait ExtendedQueryHandler: Send + Sync {
     /// The default implementation delegates the call to `self::do_describe`.
     async fn on_describe<C>(&self, client: &mut C, message: Describe) -> PgWireResult<()>
     where
-        C: ClientInfo + ClientPortalStore + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C: ClientInfo + ClientPortalStore + RawBytesWriter + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
         C::PortalStore: PortalStore<Statement = Self::Statement>,
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
@@ -341,7 +376,7 @@ pub trait ExtendedQueryHandler: Send + Sync {
     /// this implementation by `self._on_describe(...)`
     async fn _on_describe<C>(&self, client: &mut C, message: Describe) -> PgWireResult<()>
     where
-        C: ClientInfo + ClientPortalStore + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C: ClientInfo + ClientPortalStore + RawBytesWriter + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
         C::PortalStore: PortalStore<Statement = Self::Statement>,
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
@@ -375,7 +410,7 @@ pub trait ExtendedQueryHandler: Send + Sync {
     /// The default implementation flushes client buffer
     async fn on_flush<C>(&self, client: &mut C, _message: Flush) -> PgWireResult<()>
     where
-        C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C: ClientInfo + RawBytesWriter + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
@@ -387,21 +422,36 @@ pub trait ExtendedQueryHandler: Send + Sync {
     ///
     /// The default implementation flushes client buffer and sends
     /// `READY_FOR_QUERY` response to client
-    async fn on_sync<C>(&self, client: &mut C, _message: PgSync) -> PgWireResult<()>
+    async fn on_sync<C>(&self, client: &mut C, message: PgSync) -> PgWireResult<()>
     where
-        C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C: ClientInfo + RawBytesWriter + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
+        self._on_sync(client, message).await
+    }
+
+    /// The default implementation of `on_sync`.
+    ///
+    /// If you are writing pre/post processing for sync, you can reference
+    /// this implementation by `self._on_sync(...)`
+    async fn _on_sync<C>(&self, client: &mut C, _message: PgSync) -> PgWireResult<()>
+    where
+        C: ClientInfo + RawBytesWriter + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C::Error: Debug,
+        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+    {
+        #[cfg(debug_assertions)]
         info!("📨 EXTENDED QUERY PROTOCOL - Sync Message");
-        
+
         client
             .send(PgWireBackendMessage::ReadyForQuery(ReadyForQuery::new(
                 client.transaction_status(),
             )))
             .await?;
         client.flush().await?;
-        
+
+        #[cfg(debug_assertions)]
         info!("✅ COMPLETED: Sync phase successfully - ReadyForQuery sent");
         Ok(())
     }
@@ -411,7 +461,7 @@ pub trait ExtendedQueryHandler: Send + Sync {
     /// The default implementation closes certain statement or portal.
     async fn on_close<C>(&self, client: &mut C, message: Close) -> PgWireResult<()>
     where
-        C: ClientInfo + ClientPortalStore + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C: ClientInfo + ClientPortalStore + RawBytesWriter + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
         C::PortalStore: PortalStore<Statement = Self::Statement>,
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
@@ -514,12 +564,14 @@ where
     // Send either PortalSuspended or CommandComplete based on the flag
     if portal_suspended {
         // Portal is suspended - more rows available beyond max_rows limit
+        #[cfg(debug_assertions)]
         info!("📤 Sending PortalSuspended (rows sent: {})", rows);
         client
             .send(PgWireBackendMessage::PortalSuspended(PortalSuspended))
             .await?;
     } else {
         // Query complete - all rows have been sent
+        #[cfg(debug_assertions)]
         info!("📤 Sending CommandComplete (rows sent: {})", rows);
         let tag = Tag::new(&command_tag).with_rows(rows);
         client
@@ -558,6 +610,41 @@ where
     client
         .send(PgWireBackendMessage::CommandComplete(tag.into()))
         .await?;
+
+    Ok(())
+}
+
+/// Helper function to send raw PostgreSQL protocol bytes to client.
+///
+/// This bypasses the codec and writes raw bytes directly to the underlying stream.
+/// Used for binary protocol relay where we forward PostgreSQL backend responses as-is.
+///
+/// # Arguments
+/// * `framed` - The Framed stream wrapping the client connection
+/// * `raw_bytes` - Raw PostgreSQL protocol message bytes to send
+///
+/// # Returns
+/// Ok(()) on success, PgWireError on failure
+pub async fn send_raw_postgres_bytes<T, C>(
+    framed: &mut tokio_util::codec::Framed<T, C>,
+    raw_bytes: &[u8],
+) -> PgWireResult<()>
+where
+    T: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt;
+    use std::io;
+
+    // Get access to underlying stream via get_mut()
+    let writer = framed.get_mut();
+
+    // Write raw bytes directly
+    writer.write_all(raw_bytes).await
+        .map_err(|e| PgWireError::IoError(io::Error::new(e.kind(), e)))?;
+
+    // Flush to ensure bytes are sent
+    writer.flush().await
+        .map_err(|e| PgWireError::IoError(io::Error::new(e.kind(), e)))?;
 
     Ok(())
 }
