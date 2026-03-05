@@ -426,7 +426,6 @@ async fn do_process_socket<S, A, Q, EQ, C, CR, E>(
     copy_handler: Arc<C>,
     cancel_handler: Arc<CR>,
     error_handler: Arc<E>,
-    shutdown_token: Option<tokio_util::sync::CancellationToken>,
 ) -> Result<(), io::Error>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static,
@@ -444,7 +443,7 @@ where
         // Yield control periodically to prevent CPU spinning on partial/slow data
         // This is critical for handling misbehaving clients that send data slowly
         tokio::task::yield_now().await;
-
+        
         let msg = if matches!(
             socket.state(),
             PgWireConnectionState::AwaitingStartup
@@ -467,17 +466,7 @@ where
                 },
             }
         } else {
-            // Post-auth: check shutdown token while waiting for next message
-            match shutdown_token {
-                Some(ref token) => {
-                    tokio::select! {
-                        biased;
-                        _ = token.cancelled() => None,
-                        msg = socket.next() => msg,
-                    }
-                }
-                None => socket.next().await,
-            }
+            socket.next().await
         };
 
         if let Some(Ok(msg)) = msg {
@@ -501,20 +490,6 @@ where
             }
         } else {
             break;
-        }
-    }
-
-    // If shutdown was requested, send FATAL error before closing
-    if let Some(ref token) = shutdown_token {
-        if token.is_cancelled() {
-            use crate::messages::response::ErrorResponse;
-            let error = ErrorInfo::new(
-                "FATAL".into(), "57P01".into(),
-                "terminating connection due to administrator command".into(),
-            );
-            let _ = socket.send(PgWireBackendMessage::ErrorResponse(ErrorResponse::from(error))).await;
-            let _ = socket.flush().await;
-            let _ = socket.close().await;
         }
     }
 
@@ -546,7 +521,6 @@ pub async fn process_socket<H>(
     tcp_socket: TcpStream,
     tls_acceptor: Option<crate::tokio::TlsAcceptor>,
     handlers: H,
-    shutdown_token: Option<tokio_util::sync::CancellationToken>,
 ) -> Result<(), io::Error>
 where
     H: PgWireServerHandlers,
@@ -596,7 +570,6 @@ where
             copy_handler,
             cancel_handler,
             error_handler,
-            shutdown_token,
         )
         .await
     } else {
@@ -635,7 +608,6 @@ where
                     copy_handler,
                     cancel_handler,
                     error_handler,
-                    shutdown_token,
                 )
                 .await
             } else {
