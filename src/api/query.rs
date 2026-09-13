@@ -437,6 +437,23 @@ pub trait ExtendedQueryHandler: Send + Sync {
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
+        self._on_close(client, message).await
+    }
+
+    /// Default Close implementation for backends that also own native resources.
+    async fn _on_close<C>(&self, client: &mut C, message: Close) -> PgWireResult<()>
+    where
+        C: ClientInfo
+            + ClientPortalStore
+            + RawBytesWriter
+            + Sink<PgWireBackendMessage>
+            + Unpin
+            + Send
+            + Sync,
+        C::PortalStore: PortalStore<Statement = Self::Statement>,
+        C::Error: Debug,
+        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+    {
         let name = message.name.as_deref().unwrap_or(DEFAULT_NAME);
         match message.target_type {
             TARGET_TYPE_BYTE_STATEMENT => {
@@ -514,6 +531,7 @@ where
     let command_tag = results.command_tag().to_owned();
     let row_schema = results.row_schema();
     let portal_suspended = results.portal_suspended;
+    let suspension_state = results.portal_suspension_state();
     let mut data_rows = results.data_rows();
 
     // Simple query has row_schema in query response. For extended query,
@@ -532,6 +550,9 @@ where
         client.feed(PgWireBackendMessage::DataRow(row)).await?;
     }
 
+    let portal_suspended = suspension_state
+        .map(|state| state.load(std::sync::atomic::Ordering::Acquire))
+        .unwrap_or(portal_suspended);
     if portal_suspended {
         client
             .send(PgWireBackendMessage::PortalSuspended(PortalSuspended))

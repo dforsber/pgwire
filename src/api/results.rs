@@ -1,5 +1,6 @@
 use std::fmt::Debug;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use bytes::{BufMut, BytesMut};
 use futures::{
@@ -177,6 +178,8 @@ pub struct QueryResponse<'a> {
     data_rows: BoxStream<'a, PgWireResult<DataRow>>,
     /// Indicates if the portal should be suspended (more rows available beyond max_rows limit)
     pub portal_suspended: bool,
+    // Streaming backends determine EOF while producing rows, not beforehand.
+    portal_suspension_state: Option<Arc<AtomicBool>>,
 }
 
 impl<'a> QueryResponse<'a> {
@@ -191,6 +194,7 @@ impl<'a> QueryResponse<'a> {
             row_schema: field_defs,
             data_rows: row_stream.boxed(),
             portal_suspended: false,  // Default to complete (not suspended)
+            portal_suspension_state: None,
         }
     }
 
@@ -207,6 +211,15 @@ impl<'a> QueryResponse<'a> {
     /// Set the portal suspended flag
     pub fn set_portal_suspended(&mut self, suspended: bool) {
         self.portal_suspended = suspended;
+    }
+
+    /// Read this signal after the row stream ends to choose its completion message.
+    pub fn set_portal_suspension_state(&mut self, state: Arc<AtomicBool>) {
+        self.portal_suspension_state = Some(state);
+    }
+
+    pub(crate) fn portal_suspension_state(&self) -> Option<Arc<AtomicBool>> {
+        self.portal_suspension_state.clone()
     }
 
     /// Get schema of columns
@@ -400,6 +413,28 @@ mod test {
     use std::time::SystemTime;
 
     use super::*;
+
+    #[tokio::test]
+    async fn streaming_portal_completion_is_available_after_rows_end() {
+        use std::sync::atomic::Ordering;
+        for expected in [false, true] {
+            let state = Arc::new(AtomicBool::new(!expected));
+            let producer = state.clone();
+            let rows = futures::stream::poll_fn(move |_| {
+                producer.store(expected, Ordering::Release);
+                std::task::Poll::Ready(None::<PgWireResult<DataRow>>)
+            });
+            let mut response = QueryResponse::new(Arc::new(vec![]), rows);
+            response.set_portal_suspension_state(state);
+            let completion = response.portal_suspension_state().unwrap();
+            assert_eq!(completion.load(Ordering::Acquire), !expected);
+            assert!(response.data_rows().next().await.is_none());
+            assert_eq!(completion.load(Ordering::Acquire), expected);
+        }
+        let response = QueryResponse::new(Arc::new(vec![]), futures::stream::empty());
+        assert!(response.portal_suspension_state().is_none());
+        assert!(!response.portal_suspended);
+    }
 
     #[test]
     fn test_command_complete() {
