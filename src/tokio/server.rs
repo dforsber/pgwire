@@ -306,6 +306,12 @@ async fn process_error<S, ST>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static,
 {
+    // A failed/cancelled transport write may leave a partially written frame.
+    // Do not flush it, append error/readiness frames, or accept another query.
+    // The caller drops its owned socket on this terminal I/O error.
+    if let PgWireError::IoError(error) = error {
+        return Err(error);
+    }
     let error_info: ErrorInfo = error.into();
     let is_fatal = error_info.is_fatal();
     socket
